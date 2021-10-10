@@ -1,0 +1,227 @@
+########################
+##############
+# This script calculates the DEG overlap
+# First in a simplistic way, a simple head to head
+# Then in a more complicated way, looking at what % of genes change in the same direction in both 
+# treatments, partially ignoring FDR
+
+
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+# yf to 3m comparison
+datapath <- ''
+srt <- readRDS(paste0(datapath, "srt_obj_v4.RDS"))
+rna_list <- readRDS(paste0(datapath, "DEGList.RDS"))
+
+
+rna_marks <- rbindlist(rna_list)
+rna_marks$celltype <- sapply(strsplit(as.character(rna_marks$clust), "[_]"), "[", 1)
+rna_marks$source <- sapply(strsplit(as.character(rna_marks$clust), "[_]"), "[", 2)
+rna_marks_d1 <- rna_marks[grep("D1", rna_marks$group),]
+rna_marks_d28 <- rna_marks[grep("D28", rna_marks$group),]
+
+
+########### Ok first the misleading, poorman's method
+# which is essentially straight up head to head
+# This is a touch brutalistic but it works, and is clear
+
+PoorManOverlap <- function(celltype, logfc_thresh, min_thresh = 0){
+  print(celltype)
+ 
+  rna_marks_d1 <- rna_marks[grep("D1", rna_marks$group),]
+  table(rna_marks_d1$celltype)
+  indscon <- which(rna_marks_d1$celltype == celltype)
+  rna_marks_d1 <- rna_marks_d1[indscon,]
+  rna_marks_d1_3M <- rna_marks_d1[grep("3M", rna_marks_d1$clust),]
+  rna_marks_d1_YF <- rna_marks_d1[grep("YF", rna_marks_d1$clust),]
+  print(all(rna_marks_d1_3M$feature == rna_marks_d1_YF$feature))
+  rna_marks_d1_3M$logFC_YF <- rna_marks_d1_YF$logFC
+  rna_marks_d1_3M$padj_YF <- rna_marks_d1_YF$padj
+  
+  # copy for YF
+  rna_marks_d1_3M_copy <- rna_marks_d1_3M
+  
+  unique_3M_hold <- rna_marks_d1_3M
+  unique_3M_hold <- unique_3M_hold[which(abs(unique_3M_hold$logFC) > 0.25 & unique_3M_hold$padj < 0.05),]
+
+  overlapgenes <- unique_3M_hold[which(abs(unique_3M_hold$logFC_YF) > 0.25 & unique_3M_hold$padj_YF < 0.05),]
+  
+  unique_YF_hold <- rna_marks_d1_3M
+  unique_YF_hold <- unique_YF_hold[which(abs(unique_YF_hold$logFC_YF) > 0.25 & unique_YF_hold$padj_YF < 0.05),]
+  
+  # double check
+  overgenes <- intersect(unique_3M_hold$feature, unique_YF_hold$feature)
+
+  returndf <- data.frame(total_3M = nrow(unique_3M_hold),
+                         overlap = length(overgenes),
+                         total_YF = nrow(unique_YF_hold),
+                         celltype = celltype) 
+  return(returndf)
+  
+}
+
+# get all celltypes
+clustlist <- as.list(unique(rna_marks$celltype))
+poorman_list <- lapply(clustlist, function(x) {
+  df = PoorManOverlap(x, .25, min_thresh = 0)
+})
+
+poorman_df <- rbindlist(poorman_list)
+poorman_df <- poorman_df[-grep("Mix|Unkn|Div|ILCa", poorman_df$celltype),]
+
+### Now the more complicated but perhaps more informative strategy
+clustlist <- as.list(unique(rna_marks$celltype))
+
+GetSpecialGenes <- function(celltype, logfc_thresh, min_thresh = 0){
+  print(celltype)
+  rna_marks_d1 <- rna_marks[grep("D1", rna_marks$group),]
+  table(rna_marks_d1$celltype)
+  indscon <- which(rna_marks_d1$celltype == celltype)
+  rna_marks_d1 <- rna_marks_d1[indscon,]
+  rna_marks_d1_3M <- rna_marks_d1[grep("3M", rna_marks_d1$clust),]
+  rna_marks_d1_YF <- rna_marks_d1[grep("YF", rna_marks_d1$clust),]
+  print(all(rna_marks_d1_3M$feature == rna_marks_d1_YF$feature))
+  rna_marks_d1_3M$logFC_YF <- rna_marks_d1_YF$logFC
+  rna_marks_d1_YF$logFC_3M <- rna_marks_d1_3M$logFC
+  
+  if(logfc_thresh >= 0){
+    rna_marks_d1_3M_sig <- rna_marks_d1_3M[which(rna_marks_d1_3M$padj < 0.05 &
+                                                   rna_marks_d1_3M$logFC > logfc_thresh),]
+  }else{
+    rna_marks_d1_3M_sig <- rna_marks_d1_3M[which(rna_marks_d1_3M$padj < 0.05 &
+                                                   rna_marks_d1_3M$logFC < logfc_thresh),]
+  }
+  rna_marks_d1_3M_sig <- as.data.frame(rna_marks_d1_3M_sig)
+  
+  if(logfc_thresh >= 0){
+    # to be sig: 3M has to be pval < 0.05 and > log thresh
+    # then if YF is less than the log FC min thresh
+    # then the 3M gene is special
+    # basically this is to avoid cases where 3M has a log FC of .3 and YF has an FC of .1
+    # thats not really a special gene, just a strength difference
+    special_3m <- rna_marks_d1_3M_sig[which(rna_marks_d1_3M_sig$logFC > rna_marks_d1_3M_sig$logFC_YF &
+                                              rna_marks_d1_3M_sig$logFC_YF < min_thresh),]
+  }else{
+    special_3m <- rna_marks_d1_3M_sig[which(rna_marks_d1_3M_sig$logFC < rna_marks_d1_3M_sig$logFC_YF &
+                                              rna_marks_d1_3M_sig$logFC_YF > -min_thresh),]
+  }
+  
+  if(nrow(special_3m) > 0){
+    special_3m$unique_to <- "3M"
+  }
+  ### in reverse
+  if(logfc_thresh >= 0){
+    rna_marks_d1_YF_sig <- rna_marks_d1_YF[which(rna_marks_d1_YF$padj < 0.05 &
+                                                   rna_marks_d1_YF$logFC > logfc_thresh),]
+  }else{
+    rna_marks_d1_YF_sig <- rna_marks_d1_YF[which(rna_marks_d1_YF$padj < 0.05 &
+                                                   rna_marks_d1_YF$logFC < logfc_thresh),]
+  }
+  rna_marks_d1_YF_sig <- as.data.frame(rna_marks_d1_YF_sig)
+  
+  if(logfc_thresh >= 0){
+    special_yf <- rna_marks_d1_YF_sig[which(rna_marks_d1_YF_sig$logFC > rna_marks_d1_YF_sig$logFC_3M &
+                                              rna_marks_d1_YF_sig$logFC_3M < min_thresh),]
+  }else{
+    special_yf <- rna_marks_d1_YF_sig[which(rna_marks_d1_YF_sig$logFC < rna_marks_d1_YF_sig$logFC_3M &
+                                              rna_marks_d1_YF_sig$logFC_3M > -min_thresh),]
+  }
+  
+  if(nrow(special_yf) > 0){
+    special_yf$unique_to <- "YF"
+  }
+  special_3m$logFC_YF <- NULL
+  special_yf$logFC_3M <- NULL
+  
+  allspecial <- rbind(special_3m, special_yf)
+}
+
+UPspecial_list <- lapply(clustlist, function(x) {
+  df = GetSpecialGenes(x, .25, min_thresh = 0)
+})
+
+# check monocytes
+mono3mspecial <- UPspecial_list[[7]]
+upspecial_df <- rbindlist(UPspecial_list, fill = T)
+table(upspecial_df$unique_to)
+table( upspecial_df$celltype, upspecial_df$unique_to)
+
+downspecial_list <- lapply(clustlist, function(x) {
+  df = GetSpecialGenes(x, -.25, min_thresh = 0)
+})
+downspecial_df <- rbindlist(downspecial_list, fill = T)
+table(downspecial_df$source)
+
+alallspecial_df <- rbind(upspecial_df, downspecial_df)
+
+# summary stats
+table(alallspecial_df$celltype, alallspecial_df$unique_to)
+table(alallspecial_df$unique_to)
+
+special_df <- as.data.frame.matrix(table(alallspecial_df$celltype, alallspecial_df$unique_to))
+special_df$celltype <- rownames(special_df)
+colnames(special_df)[1:2] <- c("3M_special", "YF_special")
+
+#
+##
+### totals and plots
+##
+#
+
+rna_marks_d1 <- rna_marks[grep("D1", rna_marks$group),]
+rna_marks_d1 <- rna_marks_d1[which(rna_marks_d1$padj < 0.05 & abs(rna_marks_d1$logFC) > .25),]
+table(rna_marks_d1$source)
+table(rna_marks_d1$celltype, rna_marks_d1$source)
+
+all_df <- as.data.frame.matrix(table(rna_marks_d1$celltype, rna_marks_d1$source))
+all_df$celltype <- rownames(all_df)
+colnames(all_df)[1:2] <- c("M3_all", "YF_all")
+
+all_df_comb <- all_df %>%
+  left_join(special_df)
+
+
+####
+
+View(all_df)
+all_df$total <- all_df$M3_all + all_df$YF_all
+all_df$M3_pct <- all_df$M3_all/all_df$total
+all_df$YF_pct <- all_df$YF_all/all_df$total
+all_df_plot <- all_df[,c(3,5:6)]
+all_df_plot <- melt(all_df_plot)
+all_df_plot <- all_df_plot[-grep("Divid|Unkn", all_df_plot$celltype),]
+
+
+# just curious, the fraction of the total DEG
+ggplot(all_df_plot, aes(x = celltype, y = value, fill = variable)) + geom_bar(stat = "identity") +
+  theme_cowplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values = c("red", "gold")) + xlab("") + ylab("Fraction total DEG")
+
+View(all_df_comb)
+all_df_comb[is.na(all_df_comb)] <- 0
+all_df_comb$total <- all_df_comb$M3_all + all_df_comb$YF_all
+all_df_comb$M3_shared <- all_df_comb$M3_all - all_df_comb$`3M_special`
+all_df_comb$YF_shared <- all_df_comb$YF_all - all_df_comb$YF_special
+all_df_comb$M3_shared_pct <- all_df_comb$M3_shared/all_df_comb$total
+all_df_comb$YF_shared_pct <- all_df_comb$YF_shared/all_df_comb$total
+all_df_comb$M3_unique_pct <- all_df_comb$`3M_special`/all_df_comb$total
+all_df_comb$YF_unique_pct <- all_df_comb$YF_special/all_df_comb$total
+all_df_comb$M3_shared_pct_3M <- all_df_comb$M3_shared/all_df_comb$M3_all
+all_df_comb$YF_shared_pct_YF <- all_df_comb$YF_shared/all_df_comb$YF_all
+
+View(all_df_comb)
+
+
+all_df_comb_plot <- all_df_comb[,c("celltype","M3_shared_pct_3M", "YF_shared_pct_YF")]
+all_df_comb_plot <- melt(all_df_comb_plot)
+all_df_comb_plot$source <- ifelse(grepl("M3", all_df_comb_plot$variable),"3M", "YF")
+#all_df_comb_plot$value <- ifelse(is.nan(all_df_comb_plot$value), 0, all_df_comb_plot$value)
+View(all_df_comb_plot)
+all_df_comb_plot <- all_df_comb_plot[-grep("Div|Mix|Pro|Unkn", all_df_comb_plot$celltype),]
+ggplot(all_df_comb_plot, aes(x = celltype, y = value, fill = source)) + geom_bar(stat = "identity", position = "dodge") +
+  theme_cowplot() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+                          legend.title = element_blank())+
+  scale_fill_manual(values = c("red", "gold")) + xlab("") + ylab("Fraction total source \n DEGs shared") 
+
