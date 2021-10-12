@@ -1,0 +1,122 @@
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(data.table)
+library(gridExtra)
+library(ggplot2)
+library(cowplot)
+library(ggrastr)
+library(ArchR)
+library(harmony)
+library(DoubletFinder)
+set.seed(1)
+
+
+##### 
+RNApath <- ""
+somedirs <- list.dirs(RNApath, recursive = F)
+somedirs_day <- somedirs[grep("D0|D1|D28", somedirs)]
+
+one <- somedirs_day[1]
+all_bcs <- lapply(somedirs_day, function(one){
+  print(one)
+  bc_path = paste0(one, "/outs/filtered_feature_bc_matrix/barcodes.tsv.gz")
+  one_bc <- read.delim(bc_path, 
+                       header = FALSE,
+                       stringsAsFactors = FALSE)
+  return(one_bc)
+})
+
+all_feats <- lapply(somedirs_day, function(one){
+  feat_path = paste0(one, "/outs/filtered_feature_bc_matrix/features.tsv.gz")
+  one_feat <- read.delim(feat_path, 
+                         header = FALSE,
+                         stringsAsFactors = FALSE)
+  return(one_feat)
+})
+
+
+all_mats <- lapply(somedirs_day, function(one){
+  mat_path = paste0( one, "/outs/filtered_feature_bc_matrix/matrix.mtx.gz")
+  one_mat <- readMM(mat_path)
+  bc_path = paste0(one, "/outs/filtered_feature_bc_matrix/barcodes.tsv.gz")
+  one_bc <- read.delim(bc_path, 
+                       header = FALSE,
+                       stringsAsFactors = FALSE)
+  colnames(one_mat) = one_bc$V1
+  return(one_mat)
+})
+
+
+cell_info_list <- list()
+for(x in 1:length(somedirs_day)){
+  one = somedirs_day[[x]]
+  bc_path = paste0(one, "/outs/filtered_feature_bc_matrix/barcodes.tsv.gz")
+  one_bc <- read.delim(bc_path, 
+                       header = FALSE,
+                       stringsAsFactors = FALSE)
+  df_bc <- data.frame(barcode = one_bc$V1,
+                      sample_id = sapply(strsplit(one, "aleewq/"), "[", 2))
+  
+  cell_info_list[[x]] <- df_bc
+}
+
+cell_info <- rbindlist(cell_info_list)
+
+# summary stats
+table(cell_info$sample_id)
+length(which(is.na(cell_info$sample_id)))
+length(which(duplicated(cell_info$barcode)))
+cell_info$barcode <- make.unique(as.character(cell_info$barcode))
+
+# YFs have a "2" label
+cell_info$source <- ifelse(grepl("2", cell_info$sample_id), "YF", "3M")
+
+one_feat <- all_feats[[1]]
+two_feat <- all_feats[[2]]
+all(one_feat$V2 == two_feat$V2)
+
+
+bigmat <- do.call(cbind, all_mats)
+
+# check it out
+dim(bigmat)
+bigmat[1:5,1:5]
+
+# check the feature
+unique(one_feat$V3)
+gene_feats <- grep("Gene", one_feat$V3)
+adt_feats <- grep("Antibody", one_feat$V3)
+
+bigmat_gene <- bigmat[gene_feats,]
+rownames(bigmat_gene) <- one_feat$V2[gene_feats]
+bigmat_adt <- bigmat[adt_feats,]
+rownames(bigmat_adt) <- one_feat$V2[adt_feats]
+
+srt = CreateSeuratObject(bigmat_gene)
+srt = NormalizeData(srt, display.progress = FALSE)
+srt = FindVariableFeatures(srt, do.plot = F, display.progress = FALSE)
+srt = ScaleData(srt, display.progress = FALSE)
+srt <- RunPCA(object = srt, verbose = FALSE)
+ElbowPlot(srt, ndims = 50)
+srt <- FindNeighbors(object = srt, dims = 1:25)
+srt <- FindClusters(object = srt, resolution = 0.4)
+srt <- RunUMAP(object = srt, dims = 1:25)
+
+UMAPPlot(srt)
+srt[["percent.mt"]] <- PercentageFeatureSet(srt, pattern = "^Mt-")
+srt_meta <- srt@meta.data
+keep_cells <- rownames(srt_meta)[which(srt_meta$nFeature_RNA > 1000 &
+                                         srt_meta$nCount_RNA > 1500)]
+## on repeat here
+srt_sub[["percent.mt"]] <- PercentageFeatureSet(srt_sub, pattern = "^mt-")
+
+srt_meta <- srt@meta.data
+keep_cells <- rownames(srt_meta)[which(srt_meta$percent.mt < 20)]
+srt_sub <- subset(srt_sub, cells = keep_cells)
+srt_sub <- RunPCA(object = srt_sub, verbose = FALSE)
+ElbowPlot(srt_sub, ndims = 50)
+srt_sub <- FindNeighbors(object = srt_sub, dims = 1:25)
+srt_sub <- FindClusters(object = srt_sub, resolution = 0.4)
+srt_sub <- RunUMAP(object = srt_sub, dims = 1:25)
+UMAPPlot(srt_sub, label = T)
