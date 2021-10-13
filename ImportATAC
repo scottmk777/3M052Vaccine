@@ -1,0 +1,110 @@
+# This is the ArchR way
+# Works awesome
+
+
+library(ArchR)
+library(chromVAR)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(magrittr)
+library(ggplot2)
+library(Rcpp)
+library(viridis)
+library(parallel)
+library(dplyr)
+library(ggplot2)
+parallel::detectCores()
+
+addArchRThreads(threads = 4) 
+addArchRGenome("mm10")
+
+
+
+### track down frag files
+atacpath <- ""
+all_folders <- dir(atacpath, pattern = "-")
+all_folders <- all_folders[-grep(".rds|LSI", all_folders)]
+curdir_list <-paste0(atacpath, all_folders, "/outs/fragments.tsv.gz")
+names(curdir_list) <- all_folders
+inputFiles <- curdir_list
+
+ArrowFiles <- createArrowFiles(
+  inputFiles = inputFiles,
+  sampleNames = names(inputFiles),
+  filterTSS = 8, 
+  filterFrags = 1000, 
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+
+doubScores <- addDoubletScores(
+  input = ArrowFiles,
+  k = 10, #Refers to how many cells near a "pseudo-doublet" to count.
+  knnMethod = "UMAP", #Refers to the embedding to use for nearest neighbor search.
+  LSIMethod = 1
+)
+
+proj <- ArchRProject(
+  ArrowFiles = ArrowFiles, 
+  outputDirectory = atacpath,
+  copyArrows = TRUE 
+)
+
+proj <- addIterativeLSI(ArchRProj = proj, useMatrix = "TileMatrix", name = "IterativeLSI")
+proj <- addClusters(input = proj, reducedDims = "IterativeLSI")
+proj <- addUMAP(ArchRProj = proj, reducedDims = "IterativeLSI")
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample", embedding = "UMAP")
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters", embedding = "UMAP")
+
+metadat <- as.data.frame(proj@cellColData)
+sample_nms <- sapply(strsplit(metadat$Sample, "[-]"), "[", 1)
+unique(sample_nms)
+metadat$sample <- paste0("Sample", sample_nms)
+
+# load in previously defined metadata
+prev_metadat <- fread("metadat_atac.csv")
+prev_metadat_uni <- prev_metadat
+
+# only need the uniques
+prev_metadat_uni <- prev_metadat_uni[!duplicated(prev_metadat_uni$sample),]
+
+metadat_comb <- metadat %>%
+  left_join(prev_metadat_uni)
+
+proj@cellColData$cell_times <- metadat_comb$cell_times
+proj@cellColData$day <- metadat_comb$day
+proj@cellColData$source <- metadat_comb$source
+
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "cell_times", embedding = "UMAP") + 
+  theme(legend.text=element_text(size=15)) +
+  guides(colour = guide_legend(override.aes = list(size=5)))
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters", embedding = "UMAP") + 
+  theme(legend.text=element_text(size=15)) +
+  guides(colour = guide_legend(override.aes = list(size=5)))
+
+p3 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "source", embedding = "UMAP", bins = 1000) +
+  theme(legend.text=element_text(size=20)) +
+  guides(colour = guide_legend(override.aes = list(size=10)))
+
+pathToMacs2 <- findMacs2()
+
+proj <- addGroupCoverages(ArchRProj = proj, groupBy = "Clusters")
+
+proj <- addReproduciblePeakSet(
+  ArchRProj = proj, 
+  groupBy = "Clusters", 
+  pathToMacs2 = pathToMacs2
+)
+
+# save at this point
+saveRDS(file = "proj_withpeaks.RDS", proj)
+
+
+####
+# ArchR doesnt really recommend saving as RDS
+# ... but it works
+proj <- readRDS("proj_withpeaks.RDS")
+
+proj_peakdat <- addPeakMatrix(proj)
+
+saveRDS(file = "proj_withpmatrix.RDS", proj_peakdat)
+
